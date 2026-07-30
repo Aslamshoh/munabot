@@ -126,7 +126,7 @@ PRICE_LIST_PDF = MEDIA_DIR / "price_list.pdf"  # если есть готовы�
 _DEFAULT_SERVICES = [
     {"code": "makeup", "label": "💄 Макияж", "price": "150 смн", "price_value": 150},
     {"code": "hair", "label": "💇‍♀️ Причёска", "price": "80 смн", "price_value": 120},
-    {"code": "lashes", "label": "👁️ Наращивание ресниц", "price": "200 смн", "price_value": 200},
+    
     {"code": "photo", "label": "📸 Фотосъёмка", "price": "300 смн", "price_value": 300},
     {"code": "video", "label": "🎥 Видеосъёмка", "price": "500 смн", "price_value": 500},
 ]
