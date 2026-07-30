@@ -107,6 +107,8 @@ BLOCKED_FILE = BASE_DIR / "blocked_slots.json"
 BONUSES_FILE = BASE_DIR / "bonuses.json"
 BIRTHDAYS_FILE = BASE_DIR / "birthdays.json"
 NOSHOWS_FILE = BASE_DIR / "noshows.json"
+SERVICES_FILE = BASE_DIR / "services.json"      # услуги теперь редактируются из админ-панели
+PROMOTIONS_FILE = BASE_DIR / "promotions.json"  # акции, редактируются из админ-панели
 
 MEDIA_DIR = BASE_DIR / "media"
 PORTFOLIO_DIR = MEDIA_DIR / "portfolio"     # положите сюда фото/видео примеров работ
@@ -116,24 +118,83 @@ PRICE_LIST_PDF = MEDIA_DIR / "price_list.pdf"  # если есть готовы�
 # Настройки — поправьте под реальные данные Muna Beauty
 # ---------------------------------------------------------------------------
 
-# (код_услуги, подпись с эмодзи, цена одной строкой)
-SERVICES = [
-    ("makeup", "💄 Макияж", "150 смн"),
-    ("hair", "💇‍♀️ Причёска", "80 смн"),
-    ("photo", "📸 Фотосъёмка", "300 смн"),
-    ("video", "🎥 Видеосъёмка", "500 смн"),
+# Услуги (код, подпись с эмодзи, цена одной строкой, числовое значение цены в сомони)
+# хранятся в services.json и управляются из админ-панели (кнопка «🛠 Услуги»):
+# можно добавлять новые услуги и менять цены прямо в боте, без правки кода.
+# Значения ниже — только «стартовый набор» на самый первый запуск, когда
+# services.json ещё не существует.
+_DEFAULT_SERVICES = [
+    {"code": "makeup", "label": "💄 Макияж", "price": "150 смн", "price_value": 150},
+    {"code": "hair", "label": "💇‍♀️ Причёска", "price": "80 смн", "price_value": 120},
+    {"code": "lashes", "label": "👁️ Наращивание ресниц", "price": "200 смн", "price_value": 200},
+    {"code": "photo", "label": "📸 Фотосъёмка", "price": "300 смн", "price_value": 300},
+    {"code": "video", "label": "🎥 Видеосъёмка", "price": "500 смн", "price_value": 500},
 ]
-SERVICE_LABELS = {code: label for code, label, _ in SERVICES}
-SERVICE_PRICES = {code: price for code, _, price in SERVICES}
 
-# Числовое значение цены (в сомони) для подсчёта дохода в /stats.
-# Если у вас другая валюта или структура цен — поправьте эти значения.
-SERVICE_PRICE_VALUES = {
-    "makeup": 150,
-    "hair": 120,
-    "photo": 300,
-    "video": 500,
-}
+
+def _load_services() -> list[dict]:
+    if SERVICES_FILE.exists():
+        try:
+            data = json.loads(SERVICES_FILE.read_text(encoding="utf-8"))
+            if data:
+                return data
+        except json.JSONDecodeError:
+            log.warning("services.json повреждён, использую значения по умолчанию")
+    SERVICES_FILE.write_text(
+        json.dumps(_DEFAULT_SERVICES, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return [dict(s) for s in _DEFAULT_SERVICES]
+
+
+def _save_services() -> None:
+    SERVICES_FILE.write_text(json.dumps(_SERVICES_DATA, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _rebuild_service_dicts() -> None:
+    """Пересобирает удобные для остального кода структуры (SERVICES/SERVICE_LABELS/...)
+    из «сырых» данных _SERVICES_DATA. Вызывается после любого изменения услуг."""
+    global SERVICES, SERVICE_LABELS, SERVICE_PRICES, SERVICE_PRICE_VALUES
+    SERVICES = [(s["code"], s["label"], s["price"]) for s in _SERVICES_DATA]
+    SERVICE_LABELS = {s["code"]: s["label"] for s in _SERVICES_DATA}
+    SERVICE_PRICES = {s["code"]: s["price"] for s in _SERVICES_DATA}
+    SERVICE_PRICE_VALUES = {s["code"]: s["price_value"] for s in _SERVICES_DATA}
+
+
+_SERVICES_DATA: list[dict] = _load_services()
+_rebuild_service_dicts()
+
+
+def service_code_exists(code: str) -> bool:
+    return any(s["code"] == code for s in _SERVICES_DATA)
+
+
+def add_service(code: str, label: str, price: str, price_value: int) -> None:
+    _SERVICES_DATA.append({"code": code, "label": label, "price": price, "price_value": price_value})
+    _save_services()
+    _rebuild_service_dicts()
+
+
+def update_service_price(code: str, price: str, price_value: int) -> bool:
+    for s in _SERVICES_DATA:
+        if s["code"] == code:
+            s["price"] = price
+            s["price_value"] = price_value
+            _save_services()
+            _rebuild_service_dicts()
+            return True
+    return False
+
+
+def delete_service(code: str) -> bool:
+    global _SERVICES_DATA
+    before = len(_SERVICES_DATA)
+    _SERVICES_DATA = [s for s in _SERVICES_DATA if s["code"] != code]
+    if len(_SERVICES_DATA) != before:
+        _save_services()
+        _rebuild_service_dicts()
+        return True
+    return False
+
 
 # Пороги для статуса клиента (по количеству когда-либо сделанных записей).
 CLIENT_STATUS_THRESHOLDS = [
@@ -155,7 +216,7 @@ BIRTHDAY_CHECK_MINUTE = 0
 WORK_START_HOUR = 10      # начало рабочего дня
 WORK_END_HOUR = 19        # последний слот начинается до этого часа
 SLOT_MINUTES = 60         # длительность одного слота (одна для всех услуг)
-DAYS_AHEAD = 7            # на сколько дней вперёд показывать даты
+DAYS_AHEAD = 30           # на сколько дней вперёд показывать даты (календарь на месяц)
 
 WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
@@ -201,6 +262,9 @@ ADMIN_MENU_STATS = "📈 Статистика"
 ADMIN_MENU_EXPORT = "📤 Экспорт CSV"
 ADMIN_MENU_BROADCAST = "📢 Рассылка"
 ADMIN_MENU_CANCEL_ALL = "❌ Отменить предстоящие записи"
+ADMIN_MENU_REVIEWS = "📝 Отзывы"
+ADMIN_MENU_SERVICES = "🛠 Услуги"
+ADMIN_MENU_PROMOTIONS = "🎁 Акции"
 ADMIN_MENU_HELP = "ℹ️ Помощь"
 
 # ---------------------------------------------------------------------------
@@ -228,10 +292,91 @@ REVIEWS = _load_json(REVIEWS_FILE)      # { "2026-07-26_14:00": {"score": int, "
 BLOCKED = _load_json(BLOCKED_FILE)      # { "2026-07-26_14:00": true }  — слоты, закрытые админом вручную
 BONUSES = _load_json(BONUSES_FILE)      # { "<client_chat_id>": 45 }  — накопленные бонусные баллы
 BIRTHDAYS = _load_json(BIRTHDAYS_FILE)  # { "<client_chat_id>": "15.03" или "15.03.1995" }
-NOSHOWS = _load_json(NOSHOWS_FILE)      # { "2026-07-26_14:00#169...": {...} } — история неявок (не влияет на статистику/бонусы)
+NOSHOWS = _load_json(NOSHOWS_FILE)      # { "2026-07-26_14:00#169..." : {...} } — история неявок (не влияет на статистику/бонусы)
+PROMOTIONS = _load_json(PROMOTIONS_FILE)  # { "<id>": {"text": str, "photo_file_id": str|None, "date": iso} }
 
 # антифлуд: client_id -> deque(таймстампы последних сообщений)
 _flood_tracker: dict[int, deque] = defaultdict(deque)
+
+
+def add_promotion(text: str, photo_file_id: str | None = None,
+                   discount_percent: int = 0, service_codes=None,
+                   valid_until: str | None = None) -> str:
+    promo_id = str(int(datetime.now().timestamp() * 1000))
+    PROMOTIONS[promo_id] = {
+        "text": text,
+        "photo_file_id": photo_file_id,
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "discount_percent": discount_percent or 0,
+        "service_codes": service_codes or [],   # пусто = скидка действует на все услуги
+        "valid_until": valid_until,              # "ГГГГ-ММ-ДД" включительно, либо None = бессрочно
+    }
+    _save_json(PROMOTIONS_FILE, PROMOTIONS)
+    return promo_id
+
+
+def delete_promotion(promo_id: str) -> bool:
+    if PROMOTIONS.pop(promo_id, None) is not None:
+        _save_json(PROMOTIONS_FILE, PROMOTIONS)
+        return True
+    return False
+
+
+def _promotions_sorted():
+    return sorted(PROMOTIONS.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)
+
+
+def _promotion_is_active(promo: dict, on_date: date_cls | None = None) -> bool:
+    """Акция активна, если сегодня (или указанная дата) не позже даты valid_until.
+    Если valid_until не задан — акция считается бессрочной."""
+    valid_until = promo.get("valid_until")
+    if not valid_until:
+        return True
+    check_date = on_date or datetime.now().date()
+    try:
+        return check_date <= date_cls.fromisoformat(valid_until)
+    except ValueError:
+        return True
+
+
+def get_active_discount(service_code: str, on_date: date_cls | None = None) -> tuple[int, str | None]:
+    """
+    Возвращает (процент_скидки, valid_until) — самую большую активную скидку на
+    указанную услугу среди всех акций. Скидка распространяется на услугу, если
+    у акции список service_codes пуст (значит на все услуги) либо код услуги
+    в нём указан явно. Если активных скидок нет — возвращает (0, None).
+    """
+    best_percent = 0
+    best_until = None
+    for _, promo in PROMOTIONS.items():
+        percent = promo.get("discount_percent", 0)
+        if not percent:
+            continue
+        codes = promo.get("service_codes") or []
+        if codes and service_code not in codes:
+            continue
+        if not _promotion_is_active(promo, on_date):
+            continue
+        if percent > best_percent:
+            best_percent = percent
+            best_until = promo.get("valid_until")
+    return best_percent, best_until
+
+
+def get_effective_price(service_code: str, on_date: date_cls | None = None) -> tuple[str, int, int]:
+    """
+    Возвращает (текст_цены_для_клиента, итоговая_цена_в_сомони, скидка_в_процентах)
+    для услуги с учётом активных на сегодня акций. Если скидки нет — возвращает
+    исходную цену и SERVICE_PRICE_VALUES без изменений.
+    """
+    base_value = SERVICE_PRICE_VALUES.get(service_code, 0)
+    base_text = SERVICE_PRICES.get(service_code, "")
+    percent, _ = get_active_discount(service_code, on_date)
+    if not percent:
+        return base_text, base_value, 0
+    discounted_value = round(base_value * (100 - percent) / 100)
+    price_text = f"~{base_text}~ {discounted_value} смн (-{percent}%)"
+    return price_text, discounted_value, percent
 
 
 def _link_key(admin_chat_id, admin_message_id: int) -> str:
@@ -249,12 +394,17 @@ def recall(admin_chat_id, admin_message_id: int):
     return LINKS.get(_link_key(admin_chat_id, admin_message_id))
 
 
-def save_booking(slot_key: str, service_code: str, client_chat_id: int, name: str, phone: str) -> None:
+def save_booking(slot_key: str, service_code: str, client_chat_id: int, name: str, phone: str,
+                  price_value: int | None = None) -> None:
     BOOKINGS[slot_key] = {
         "service": service_code,
         "client_chat_id": client_chat_id,
         "name": name,
         "phone": phone,
+        # цена, зафиксированная в момент записи (с учётом скидки, если она действовала) —
+        # используется для статистики/дохода, чтобы будущие изменения цены или акции
+        # не искажали задним числом уже прошедшие записи.
+        "price_value": price_value if price_value is not None else SERVICE_PRICE_VALUES.get(service_code, 0),
     }
     _save_json(BOOKINGS_FILE, BOOKINGS)
 
@@ -406,6 +556,8 @@ MENU_PORTFOLIO = "🖼 Портфолио"
 MENU_PRICE = "💰 Прайс-лист"
 MENU_ADDRESS = "📍 Адрес"
 MENU_SOCIAL = "🌐 Наши соцсети"
+MENU_REVIEWS = "⭐ Отзывы"
+MENU_PROMOTIONS = "🎁 Акции"
 
 
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -415,6 +567,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
             [MENU_BOOK],
             [MENU_MY_BOOKINGS],
             [MENU_PORTFOLIO, MENU_PRICE],
+            [MENU_PROMOTIONS, MENU_REVIEWS],
             [MENU_ADDRESS, MENU_SOCIAL],
         ],
         resize_keyboard=True,   # кнопки компактнее, не занимают весь экран
@@ -436,20 +589,26 @@ async def client_book_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def _services_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"{label} — {SERVICE_PRICES[code]}", callback_data=f"svc:{code}")]
-        for code, label, _ in SERVICES
-    ]
+    rows = []
+    for code, label, _ in SERVICES:
+        price_text, _, _ = get_effective_price(code)
+        rows.append([InlineKeyboardButton(f"{label} — {price_text}", callback_data=f"svc:{code}")])
     return InlineKeyboardMarkup(rows)
 
 
 def _dates_keyboard(service_code: str) -> InlineKeyboardMarkup:
     rows = []
     today = datetime.now().date()
+    row = []
     for i in range(DAYS_AHEAD):
         d = today + timedelta(days=i)
         label = f"{d.strftime('%d.%m')} ({WEEKDAY_RU[d.weekday()]})"
-        rows.append([InlineKeyboardButton(label, callback_data=f"date:{service_code}:{d.isoformat()}")])
+        row.append(InlineKeyboardButton(label, callback_data=f"date:{service_code}:{d.isoformat()}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton("⬅️ Назад к услугам", callback_data="book:start")])
     return InlineKeyboardMarkup(rows)
 
@@ -504,6 +663,41 @@ async def client_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    pending_review = context.user_data.get("pending_free_review")
+    if pending_review:
+        raw_text = (msg.text or "").strip()
+        if raw_text.lower() == "отмена":
+            context.user_data.pop("pending_free_review", None)
+            await msg.reply_text("Отзыв отменён.", reply_markup=_main_menu_keyboard())
+            return
+        comment = None if raw_text == "-" else raw_text
+        review_key = f"free_{int(datetime.now().timestamp() * 1000)}_{user.id}"
+        REVIEWS[review_key] = {
+            "score": pending_review["score"],
+            "client_chat_id": msg.chat_id,
+            "name": user.full_name,
+            "text": comment,
+            "date": datetime.now().isoformat(timespec="seconds"),
+            "slot_key": None,
+        }
+        _save_json(REVIEWS_FILE, REVIEWS)
+        context.user_data.pop("pending_free_review", None)
+        await msg.reply_text("Спасибо за отзыв! 🌸", reply_markup=_main_menu_keyboard())
+
+        if ADMIN_CHAT_IDS:
+            admin_bot = context.bot_data["admin_bot"]
+            stars = "⭐" * pending_review["score"]
+            text_line = f"\n«{comment}»" if comment else ""
+            for admin_chat_id in ADMIN_CHAT_IDS:
+                try:
+                    await admin_bot.send_message(
+                        chat_id=admin_chat_id,
+                        text=f"⭐ Новый отзыв: {stars} от {user.full_name}{text_line}",
+                    )
+                except Exception:
+                    log.exception("Не удалось переслать отзыв админу %s", admin_chat_id)
+        return
+
     # Нажатия постоянных кнопок снизу приходят как обычный текст — перехватываем их здесь,
     # до пересылки администратору.
     if msg.text == MENU_BOOK:
@@ -524,6 +718,12 @@ async def client_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if msg.text == MENU_SOCIAL:
         await _send_social(context, msg.chat_id)
+        return
+    if msg.text == MENU_REVIEWS:
+        await _send_reviews_menu(context, msg.chat_id)
+        return
+    if msg.text == MENU_PROMOTIONS:
+        await _send_promotions(context, msg.chat_id)
         return
 
     if is_flooding(user.id):
@@ -636,13 +836,13 @@ async def _finalize_booking(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     label = SERVICE_LABELS.get(service_code, service_code)
-    price = SERVICE_PRICES.get(service_code, "")
-    save_booking(slot_key, service_code, chat_id, user.full_name, phone)
+    price_text, price_value, discount_percent = get_effective_price(service_code, date_cls.fromisoformat(date_iso))
+    save_booking(slot_key, service_code, chat_id, user.full_name, phone, price_value=price_value)
 
     d = date_cls.fromisoformat(date_iso)
     confirm_text = (
         f"Вы записаны ✅\n\n"
-        f"Услуга: {label} ({price})\n"
+        f"Услуга: {label} ({price_text})\n"
         f"Дата: {d.strftime('%d.%m.%Y')} ({WEEKDAY_RU[d.weekday()]})\n"
         f"Время: {time_str}\n\n"
         f"Мы напомним вам за {REMINDER_HOURS_BEFORE} ч. до визита."
@@ -654,13 +854,14 @@ async def _finalize_booking(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if ADMIN_CHAT_IDS:
         admin_bot = context.bot_data["admin_bot"]
         status = get_client_status(chat_id)
+        discount_line = f"\nСкидка: -{discount_percent}% (по акции)" if discount_percent else ""
         admin_text = (
             f"🆕 Новая запись\n"
             f"Клиент: {user.full_name} (@{user.username or 'нет username'})\n"
             f"Статус клиента: {status}\n"
             f"Телефон: {phone or 'не указан'}\n"
             f"ID клиента: {user.id}\n"
-            f"Услуга: {label} ({price})\n"
+            f"Услуга: {label} ({price_text}){discount_line}\n"
             f"Дата: {d.strftime('%d.%m.%Y')} ({WEEKDAY_RU[d.weekday()]})\n"
             f"Время: {time_str}"
         )
@@ -753,7 +954,15 @@ async def client_review_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     _, slot_key, score_str = query.data.split(":", 2)
     score = int(score_str)
-    REVIEWS[slot_key] = {"score": score, "client_chat_id": query.message.chat_id}
+    booking_entry = BOOKINGS.get(slot_key, {})
+    REVIEWS[slot_key] = {
+        "score": score,
+        "client_chat_id": query.message.chat_id,
+        "name": booking_entry.get("name", "Клиент"),
+        "text": None,
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "slot_key": slot_key,
+    }
     _save_json(REVIEWS_FILE, REVIEWS)
     await query.edit_message_text(f"Спасибо за оценку: {'⭐' * score}")
 
@@ -795,7 +1004,8 @@ async def _send_price(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
         return
     lines = ["💰 Прайс-лист:"]
     for code, label, price in SERVICES:
-        lines.append(f"{label} — {price}")
+        price_text, _, _ = get_effective_price(code)
+        lines.append(f"{label} — {price_text}")
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
@@ -822,6 +1032,106 @@ async def _send_social(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
+
+
+async def _send_promotions(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Кнопка «🎁 Акции» — показывает всю информацию по текущим (ещё не истёкшим) акциям."""
+    active = [(pid, p) for pid, p in _promotions_sorted() if _promotion_is_active(p)]
+    if not active:
+        await context.bot.send_message(chat_id=chat_id, text="🎁 Акций пока нет — загляните позже 🌸")
+        return
+    for promo_id, promo in active:
+        text = f"🎁 {promo['text']}"
+        percent = promo.get("discount_percent", 0)
+        until = promo.get("valid_until")
+        if percent:
+            codes = promo.get("service_codes") or []
+            if codes:
+                names = ", ".join(SERVICE_LABELS.get(c, c) for c in codes)
+                text += f"\n\nСкидка {percent}% на: {names}"
+            else:
+                text += f"\n\nСкидка {percent}% на все услуги"
+            if until:
+                d = date_cls.fromisoformat(until)
+                text += f"\nАкция действует до {d.strftime('%d.%m.%Y')} включительно"
+        photo_id = promo.get("photo_file_id")
+        try:
+            if photo_id:
+                await context.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+        except Exception:
+            log.exception("Не удалось отправить акцию %s", promo_id)
+
+
+def _reviews_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ Оставить отзыв", callback_data="reviews:leave")],
+        [InlineKeyboardButton("📖 Посмотреть отзывы", callback_data="reviews:view")],
+    ])
+
+
+def _reviews_summary_text() -> str:
+    if not REVIEWS:
+        return "⭐ Отзывов пока нет — станьте первым!"
+    scores = [r.get("score", 0) for r in REVIEWS.values()]
+    avg = sum(scores) / len(scores)
+    return f"⭐ Средняя оценка: {avg:.1f}/5 (отзывов: {len(scores)})"
+
+
+def _format_reviews_list(limit: int = 10) -> str:
+    if not REVIEWS:
+        return "Отзывов пока нет."
+    items = sorted(REVIEWS.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)[:limit]
+    lines = ["📖 Последние отзывы:"]
+    for _, r in items:
+        stars = "⭐" * r.get("score", 0)
+        name = r.get("name", "Клиент")
+        text = r.get("text")
+        line = f"\n{stars} — {name}"
+        if text:
+            line += f"\n«{text}»"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _free_review_score_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(str(n), callback_data=f"freereview:{n}") for n in range(1, 6)
+    ]])
+
+
+async def _send_reviews_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_reviews_summary_text() + "\n\nЧто хотите сделать?",
+        reply_markup=_reviews_menu_keyboard(),
+    )
+
+
+async def client_reviews_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает меню отзывов клиента: reviews:leave / reviews:view / freereview:N."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "reviews:leave":
+        await query.edit_message_text("Поставьте оценку от 1 до 5:", reply_markup=_free_review_score_keyboard())
+        return
+
+    if data == "reviews:view":
+        await query.edit_message_text(_format_reviews_list(), reply_markup=_reviews_menu_keyboard())
+        return
+
+    if data.startswith("freereview:"):
+        score = int(data.split(":", 1)[1])
+        context.user_data["pending_free_review"] = {"score": score}
+        await query.edit_message_text(
+            f"Оценка: {'⭐' * score}\n\n"
+            f"Напишите комментарий текстом, либо отправьте «-», чтобы оставить отзыв без комментария "
+            f"(или «Отмена», чтобы отменить)."
+        )
+        return
 
 
 def _build_my_bookings_view(chat_id: int):
@@ -909,10 +1219,16 @@ def _resched_dates_keyboard(old_slot_key: str) -> InlineKeyboardMarkup:
     """Клавиатура выбора новой даты при переносе существующей записи."""
     rows = []
     today = datetime.now().date()
+    row = []
     for i in range(DAYS_AHEAD):
         d = today + timedelta(days=i)
         label = f"{d.strftime('%d.%m')} ({WEEKDAY_RU[d.weekday()]})"
-        rows.append([InlineKeyboardButton(label, callback_data=f"resched_date:{old_slot_key}:{d.isoformat()}")])
+        row.append(InlineKeyboardButton(label, callback_data=f"resched_date:{old_slot_key}:{d.isoformat()}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton("⬅️ Назад к моим записям", callback_data="mybookings:list")])
     return InlineKeyboardMarkup(rows)
 
@@ -989,18 +1305,19 @@ async def client_reschedule_callback(update: Update, context: ContextTypes.DEFAU
 
         # Переносим: удаляем старый слот, создаём новый с теми же данными клиента.
         delete_booking(old_slot_key)
-        save_booking(new_slot_key, entry["service"], entry["client_chat_id"], entry["name"], entry["phone"])
+        save_booking(new_slot_key, entry["service"], entry["client_chat_id"], entry["name"], entry["phone"],
+                     price_value=entry.get("price_value"))
 
         # Старые напоминание/запрос отзыва больше не актуальны — отменяем и ставим новые.
         _cancel_jobs(context.application.job_queue, old_slot_key)
         _schedule_reminder_and_review(context, new_slot_key, entry["client_chat_id"])
 
         label = SERVICE_LABELS.get(entry["service"], entry["service"])
-        price = SERVICE_PRICES.get(entry["service"], "")
+        price_text, _, _ = get_effective_price(entry["service"], date_cls.fromisoformat(date_iso))
         d = date_cls.fromisoformat(date_iso)
         await query.edit_message_text(
             f"Запись перенесена ✅\n\n"
-            f"Услуга: {label} ({price})\n"
+            f"Услуга: {label} ({price_text})\n"
             f"Новая дата: {d.strftime('%d.%m.%Y')} ({WEEKDAY_RU[d.weekday()]})\n"
             f"Новое время: {time_str}"
         )
@@ -1016,7 +1333,7 @@ async def client_reschedule_callback(update: Update, context: ContextTypes.DEFAU
                             f"🔄 Клиент перенёс запись\n"
                             f"Клиент: {entry['name']}\n"
                             f"Телефон: {entry.get('phone') or 'не указан'}\n"
-                            f"Услуга: {label} ({price})\n"
+                            f"Услуга: {label} ({price_text})\n"
                             f"Было: {old_date_part} {old_time_part}\n"
                             f"Стало: {date_iso} {time_str}"
                         ),
@@ -1039,9 +1356,9 @@ async def client_booking_callback(update: Update, context: ContextTypes.DEFAULT_
     if data.startswith("svc:"):
         service_code = data.split(":", 1)[1]
         label = SERVICE_LABELS.get(service_code, service_code)
-        price = SERVICE_PRICES.get(service_code, "")
+        price_text, _, _ = get_effective_price(service_code)
         await query.edit_message_text(
-            f"Услуга: {label} ({price})\nВыберите дату:", reply_markup=_dates_keyboard(service_code)
+            f"Услуга: {label} ({price_text})\nВыберите дату:", reply_markup=_dates_keyboard(service_code)
         )
         return
 
@@ -1099,6 +1416,8 @@ def _admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [ADMIN_MENU_SLOTS, ADMIN_MENU_STATS],
             [ADMIN_MENU_ADD, ADMIN_MENU_EXPORT],
             [ADMIN_MENU_BROADCAST, ADMIN_MENU_CANCEL_ALL],
+            [ADMIN_MENU_REVIEWS],
+            [ADMIN_MENU_SERVICES, ADMIN_MENU_PROMOTIONS],
             [ADMIN_MENU_HELP],
         ],
         resize_keyboard=True,
@@ -1128,6 +1447,9 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "а на свободном 🟢 слоте можно сразу «Записать клиента»)\n"
         "/addbooking — добавить запись вручную (клиент по телефону, без Telegram)\n"
         "/stats — статистика за текущий месяц (учитывает и ручные записи)\n"
+        "/reviews — список отзывов клиентов\n"
+        "/services — добавить услугу или изменить цену существующей\n"
+        "/promotions — добавить или удалить акцию (кнопка «🎁 Акции» у клиента)\n"
         "/export — выгрузить все записи в CSV\n"
         "/broadcast текст — разослать сообщение всем клиентам",
         reply_markup=_admin_menu_keyboard(),
@@ -1229,6 +1551,32 @@ def _calendar_keyboard(date_iso: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("Сегодня", callback_data=f"cal_date:{datetime.now().date().isoformat()}"),
         InlineKeyboardButton("➡️", callback_data=f"cal_date:{next_day}"),
     ])
+    rows.append([
+        InlineKeyboardButton("📆 Выбрать день из месяца", callback_data=f"cal_pickmonth:{date_iso}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _month_picker_keyboard(anchor_date_iso: str) -> InlineKeyboardMarkup:
+    """
+    Компактная сетка дней на месяц вперёд от anchor_date_iso (по 7 дней в ряд, как
+    обычный календарь), чтобы быстро перейти к любому дню в пределах месяца
+    расписания, а не листать по одному дню.
+    """
+    anchor = date_cls.fromisoformat(anchor_date_iso)
+    today = datetime.now().date()
+    rows = []
+    row = []
+    for i in range(30):
+        d = today + timedelta(days=i)
+        mark = "•" if d == anchor else ""
+        row.append(InlineKeyboardButton(f"{d.day}{mark}", callback_data=f"cal_date:{d.isoformat()}"))
+        if len(row) == 7:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Назад к дню", callback_data=f"cal_date:{anchor_date_iso}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1251,7 +1599,7 @@ async def admin_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admin_calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает нажатия в интерактивном календаре: cal_date / cal_toggle / cal_info."""
+    """Обрабатывает нажатия в интерактивном календаре: cal_date / cal_toggle / cal_info / cal_pickmonth."""
     query = update.callback_query
 
     if not _is_admin_chat(update.effective_chat.id):
@@ -1259,6 +1607,15 @@ async def admin_calendar_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     data = query.data
+
+    if data.startswith("cal_pickmonth:"):
+        anchor_date_iso = data.split(":", 1)[1]
+        await query.answer()
+        await query.edit_message_text(
+            "📆 Выберите день (доступно на месяц вперёд):",
+            reply_markup=_month_picker_keyboard(anchor_date_iso),
+        )
+        return
 
     if data.startswith("cal_date:"):
         date_iso = data.split(":", 1)[1]
@@ -1385,10 +1742,16 @@ def _admin_add_services_keyboard() -> InlineKeyboardMarkup:
 def _admin_add_dates_keyboard(service_code: str) -> InlineKeyboardMarkup:
     rows = []
     today = datetime.now().date()
+    row = []
     for i in range(DAYS_AHEAD):
         d = today + timedelta(days=i)
         label = f"{d.strftime('%d.%m')} ({WEEKDAY_RU[d.weekday()]})"
-        rows.append([InlineKeyboardButton(label, callback_data=f"aadd_date:{service_code}:{d.isoformat()}")])
+        row.append(InlineKeyboardButton(label, callback_data=f"aadd_date:{service_code}:{d.isoformat()}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton("⬅️ Назад к услугам", callback_data="aadd_back_svc")])
     return InlineKeyboardMarkup(rows)
 
@@ -1512,18 +1875,19 @@ async def _finalize_admin_booking(update: Update, context: ContextTypes.DEFAULT_
 
     unblock_slot(slot_key)  # если слот был закрыт вручную — запись автоматически его открывает
     fake_chat_id = _next_manual_client_id()
-    save_booking(slot_key, service_code, fake_chat_id, name, phone)
+    _, price_value, _ = get_effective_price(service_code, date_cls.fromisoformat(date_iso))
+    save_booking(slot_key, service_code, fake_chat_id, name, phone, price_value=price_value)
     BOOKINGS[slot_key]["manual"] = True
     _save_json(BOOKINGS_FILE, BOOKINGS)
 
     label = SERVICE_LABELS.get(service_code, service_code)
-    price = SERVICE_PRICES.get(service_code, "")
+    price_text, _, _ = get_effective_price(service_code, date_cls.fromisoformat(date_iso))
     d = date_cls.fromisoformat(date_iso)
     await update.message.reply_text(
         f"✅ Запись добавлена вручную\n\n"
         f"Клиент: {name}\n"
         f"Телефон: {phone or 'не указан'}\n"
-        f"Услуга: {label} ({price})\n"
+        f"Услуга: {label} ({price_text})\n"
         f"Дата: {d.strftime('%d.%m.%Y')} ({WEEKDAY_RU[d.weekday()]})\n"
         f"Время: {time_str}\n\n"
         f"(запись без Telegram — напоминание и запрос отзыва клиенту не отправляются, "
@@ -1541,7 +1905,7 @@ def _compute_stats() -> dict:
     month_entries = [(k, v) for k, v in BOOKINGS.items() if k.startswith(month_prefix)]
 
     total_count = len(month_entries)
-    revenue = sum(SERVICE_PRICE_VALUES.get(v["service"], 0) for _, v in month_entries)
+    revenue = sum(v.get("price_value", SERVICE_PRICE_VALUES.get(v["service"], 0)) for _, v in month_entries)
 
     service_counter = Counter(v["service"] for _, v in month_entries)
     top = service_counter.most_common(1)
@@ -1585,7 +1949,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = (
         f"📈 Статистика за {stats['month_label']}\n\n"
         f"Записей за месяц: {stats['total_count']}\n"
-        f"Ожидаемый доход (по прайсу): {stats['revenue']} смн\n"
+        f"Ожидаемый доход (по прайсу, с учётом акций на момент записи): {stats['revenue']} смн\n"
         f"Самая популярная услуга: {stats['top_service_label']}\n"
         f"Лучший день недели: {stats['best_day_label']}\n"
         f"Новых клиентов: {stats['new_clients']}\n"
@@ -1594,6 +1958,226 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"отменённые записи в подсчёт не входят)"
     )
     await update.message.reply_text(text)
+
+
+async def admin_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reviews и кнопка «📝 Отзывы» — список последних отзывов клиентов."""
+    if not _is_admin_chat(update.effective_chat.id):
+        await _deny_admin_access(update)
+        return
+    text = _reviews_summary_text() + "\n\n" + _format_reviews_list(limit=30)
+    await update.message.reply_text(text, reply_markup=_admin_menu_keyboard())
+
+
+# --- Управление услугами (добавление / изменение цены / удаление) -----------------
+
+def _admin_services_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for code, label, price in SERVICES:
+        rows.append([InlineKeyboardButton(f"{label} — {price}", callback_data="svc_noop")])
+        rows.append([
+            InlineKeyboardButton("✏️ Изменить цену", callback_data=f"svc_editprice:{code}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"svc_delete_ask:{code}"),
+        ])
+    rows.append([InlineKeyboardButton("➕ Добавить услугу", callback_data="svc_add_start")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def admin_services_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/services и кнопка «🛠 Услуги» — список услуг с управлением."""
+    if not _is_admin_chat(update.effective_chat.id):
+        await _deny_admin_access(update)
+        return
+    context.user_data.pop("awaiting", None)
+    await update.message.reply_text(
+        "🛠 Управление услугами:\n\nЗдесь можно добавить новую услугу, изменить цену "
+        "существующей или удалить её.",
+        reply_markup=_admin_services_keyboard(),
+    )
+
+
+async def admin_services_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия в панели управления услугами (svc_*)."""
+    query = update.callback_query
+
+    if not _is_admin_chat(update.effective_chat.id):
+        await query.answer("⛔ Доступ только для администратора", show_alert=True)
+        return
+
+    data = query.data
+
+    if data == "svc_noop":
+        await query.answer()
+        return
+
+    if data == "svc_add_start":
+        await query.answer()
+        context.user_data["svc_add"] = {}
+        context.user_data["awaiting"] = "svc_add_code"
+        await query.edit_message_text(
+            "➕ Новая услуга\n\nВведите короткий код услуги латиницей без пробелов "
+            "(например: nails, brows) — он используется только внутри бота, клиент его "
+            "не увидит. Или напишите «Отмена»:"
+        )
+        return
+
+    if data.startswith("svc_editprice:"):
+        code = data.split(":", 1)[1]
+        await query.answer()
+        context.user_data["svc_edit_code"] = code
+        context.user_data["awaiting"] = "svc_edit_price"
+        label = SERVICE_LABELS.get(code, code)
+        await query.edit_message_text(
+            f"Услуга: {label}\nТекущая цена: {SERVICE_PRICES.get(code)}\n\n"
+            f"Введите новую цену одной строкой, как её увидит клиент (например: 250 смн), "
+            f"или напишите «Отмена»:"
+        )
+        return
+
+    if data.startswith("svc_delete_ask:"):
+        code = data.split(":", 1)[1]
+        label = SERVICE_LABELS.get(code, code)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Да, удалить", callback_data=f"svc_delete_yes:{code}"),
+            InlineKeyboardButton("Нет", callback_data="svc_delete_no"),
+        ]])
+        await query.answer()
+        await query.edit_message_text(
+            f"Удалить услугу «{label}»?\n\nУже существующие записи на эту услугу это не затронет.",
+            reply_markup=keyboard,
+        )
+        return
+
+    if data == "svc_delete_no":
+        await query.answer("Отменено")
+        await query.edit_message_text("🛠 Управление услугами:", reply_markup=_admin_services_keyboard())
+        return
+
+    if data.startswith("svc_delete_yes:"):
+        code = data.split(":", 1)[1]
+        delete_service(code)
+        await query.answer("Услуга удалена")
+        await query.edit_message_text("🛠 Управление услугами:", reply_markup=_admin_services_keyboard())
+        return
+
+
+# --- Управление акциями (добавление / удаление) ------------------------------------
+
+def _admin_promotions_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for promo_id, promo in _promotions_sorted():
+        preview = promo["text"][:30] + ("…" if len(promo["text"]) > 30 else "")
+        percent = promo.get("discount_percent", 0)
+        status_mark = "✅" if _promotion_is_active(promo) else "⏰истекла"
+        title = f"🗑 {preview}"
+        if percent:
+            title += f" (-{percent}% {status_mark})"
+        rows.append([InlineKeyboardButton(title, callback_data=f"promo_delete_ask:{promo_id}")])
+    rows.append([InlineKeyboardButton("➕ Добавить акцию", callback_data="promo_add_start")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _promo_services_pick_keyboard(selected: list) -> InlineKeyboardMarkup:
+    """Клавиатура выбора услуг, на которые действует скидка (мультивыбор с галочками)."""
+    rows = []
+    for code, label, _ in SERVICES:
+        mark = "✅ " if code in selected else ""
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"promosvc_toggle:{code}")])
+    rows.append([InlineKeyboardButton("🔁 Все услуги (снять выбор)", callback_data="promosvc_clear")])
+    rows.append([InlineKeyboardButton("➡️ Дальше", callback_data="promosvc_done")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def admin_promotions_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/promotions и кнопка «🎁 Акции» — управление акциями, которые видит клиент."""
+    if not _is_admin_chat(update.effective_chat.id):
+        await _deny_admin_access(update)
+        return
+    context.user_data.pop("awaiting", None)
+    if PROMOTIONS:
+        lines = []
+        for _, p in _promotions_sorted():
+            line = f"🎁 {p['text']}"
+            percent = p.get("discount_percent", 0)
+            if percent:
+                until = p.get("valid_until")
+                until_txt = f" до {date_cls.fromisoformat(until).strftime('%d.%m.%Y')}" if until else ""
+                active_txt = "действует" if _promotion_is_active(p) else "истекла"
+                line += f"\nСкидка {percent}%{until_txt} ({active_txt})"
+            lines.append(line)
+        text = "🎁 Текущие акции (их видит клиент по кнопке «🎁 Акции»):\n\n" + "\n\n".join(lines)
+    else:
+        text = "🎁 Акций пока нет."
+    await update.message.reply_text(text, reply_markup=_admin_promotions_keyboard())
+
+
+async def admin_promotions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия в панели управления акциями (promo_*, promosvc_*)."""
+    query = update.callback_query
+
+    if not _is_admin_chat(update.effective_chat.id):
+        await query.answer("⛔ Доступ только для администратора", show_alert=True)
+        return
+
+    data = query.data
+
+    if data == "promo_add_start":
+        await query.answer()
+        context.user_data["awaiting"] = "promo_add_text"
+        await query.edit_message_text(
+            "➕ Новая акция\n\nОтправьте текст акции. Если нужна картинка — отправьте фото "
+            "с текстом акции в подписи к нему. Или напишите «Отмена»."
+        )
+        return
+
+    if data.startswith("promosvc_toggle:"):
+        code = data.split(":", 1)[1]
+        selected = context.user_data.setdefault("promo_add", {}).setdefault("service_codes", [])
+        if code in selected:
+            selected.remove(code)
+        else:
+            selected.append(code)
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=_promo_services_pick_keyboard(selected))
+        return
+
+    if data == "promosvc_clear":
+        context.user_data.setdefault("promo_add", {})["service_codes"] = []
+        await query.answer("Скидка будет действовать на все услуги")
+        await query.edit_message_reply_markup(reply_markup=_promo_services_pick_keyboard([]))
+        return
+
+    if data == "promosvc_done":
+        await query.answer()
+        context.user_data["awaiting"] = "promo_add_until"
+        await query.edit_message_text(
+            "До какого числа действует скидка? Введите дату в формате ГГГГ-ММ-ДД "
+            "(например 2026-08-10 — тогда 10 августа скидка ещё работает, а 11-го уже нет), "
+            "или «-», если скидка бессрочная, либо «Отмена»:"
+        )
+        return
+
+    if data.startswith("promo_delete_ask:"):
+        promo_id = data.split(":", 1)[1]
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Да, удалить", callback_data=f"promo_delete_yes:{promo_id}"),
+            InlineKeyboardButton("Нет", callback_data="promo_delete_no"),
+        ]])
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+        return
+
+    if data == "promo_delete_no":
+        await query.answer("Отменено")
+        await query.edit_message_text("🎁 Управление акциями:", reply_markup=_admin_promotions_keyboard())
+        return
+
+    if data.startswith("promo_delete_yes:"):
+        promo_id = data.split(":", 1)[1]
+        delete_promotion(promo_id)
+        await query.answer("Акция удалена")
+        await query.edit_message_text("🎁 Управление акциями:", reply_markup=_admin_promotions_keyboard())
+        return
 
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1607,11 +2191,13 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Дата", "Время", "Услуга", "Клиент", "Телефон", "ID клиента"])
+    writer.writerow(["Дата", "Время", "Услуга", "Клиент", "Телефон", "ID клиента", "Цена (смн)"])
     for key, val in sorted(BOOKINGS.items()):
         date_part, time_part = key.split("_", 1)
         label = SERVICE_LABELS.get(val["service"], val["service"])
-        writer.writerow([date_part, time_part, label, val.get("name", ""), val.get("phone", ""), val.get("client_chat_id", "")])
+        price_value = val.get("price_value", SERVICE_PRICE_VALUES.get(val["service"], 0))
+        writer.writerow([date_part, time_part, label, val.get("name", ""), val.get("phone", ""),
+                          val.get("client_chat_id", ""), price_value])
 
     buffer.seek(0)
     data_bytes = buffer.getvalue().encode("utf-8-sig")  # BOM для корректного открытия в Excel
@@ -1806,6 +2392,194 @@ async def admin_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _finalize_admin_booking(update, context, booking_data, phone)
         return
 
+    # --- Шаги диалога добавления новой услуги: код, название, цена-строка, цена-число ---
+    if context.user_data.get("awaiting") == "svc_add_code":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("svc_add", None)
+            await msg.reply_text("Добавление услуги отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        code = text.strip().lower().replace(" ", "_")
+        if not code or service_code_exists(code):
+            context.user_data["awaiting"] = "svc_add_code"
+            await msg.reply_text(
+                f"Код «{code}» уже занят или пуст. Введите другой код (или «Отмена»):"
+            )
+            return
+        context.user_data.setdefault("svc_add", {})["code"] = code
+        context.user_data["awaiting"] = "svc_add_label"
+        await msg.reply_text("Введите название услуги с эмодзи (например: 💅 Маникюр):")
+        return
+
+    if context.user_data.get("awaiting") == "svc_add_label":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("svc_add", None)
+            await msg.reply_text("Добавление услуги отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        context.user_data.setdefault("svc_add", {})["label"] = text
+        context.user_data["awaiting"] = "svc_add_price"
+        await msg.reply_text(
+            "Введите цену одной строкой, как её увидит клиент (например: 250 смн):"
+        )
+        return
+
+    if context.user_data.get("awaiting") == "svc_add_price":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("svc_add", None)
+            await msg.reply_text("Добавление услуги отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        context.user_data.setdefault("svc_add", {})["price"] = text
+        context.user_data["awaiting"] = "svc_add_value"
+        await msg.reply_text(
+            "Введите цену числом в сомони, для подсчёта статистики/дохода (например: 250):"
+        )
+        return
+
+    if context.user_data.get("awaiting") == "svc_add_value":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("svc_add", None)
+            await msg.reply_text("Добавление услуги отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        try:
+            value = int(text.strip())
+        except ValueError:
+            context.user_data["awaiting"] = "svc_add_value"
+            await msg.reply_text("Нужно целое число, например 250. Попробуйте ещё раз (или «Отмена»):")
+            return
+        svc_data = context.user_data.pop("svc_add", {})
+        add_service(svc_data["code"], svc_data["label"], svc_data["price"], value)
+        await msg.reply_text(
+            f"✅ Услуга добавлена: {svc_data['label']} — {svc_data['price']}",
+            reply_markup=_admin_menu_keyboard(),
+        )
+        return
+
+    # --- Шаги диалога изменения цены услуги: цена-строка, затем цена-число ---
+    if context.user_data.get("awaiting") == "svc_edit_price":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("svc_edit_code", None)
+            await msg.reply_text("Изменение цены отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        context.user_data["svc_edit_price_text"] = text
+        context.user_data["awaiting"] = "svc_edit_value"
+        await msg.reply_text("Введите цену числом в сомони, для статистики (например: 250):")
+        return
+
+    if context.user_data.get("awaiting") == "svc_edit_value":
+        context.user_data.pop("awaiting", None)
+        code = context.user_data.pop("svc_edit_code", None)
+        price_text = context.user_data.pop("svc_edit_price_text", None)
+        if text.lower() == "отмена" or not code:
+            await msg.reply_text("Изменение цены отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        try:
+            value = int(text.strip())
+        except ValueError:
+            await msg.reply_text(
+                "Нужно целое число. Начните заново через 🛠 Услуги.", reply_markup=_admin_menu_keyboard()
+            )
+            return
+        update_service_price(code, price_text, value)
+        label = SERVICE_LABELS.get(code, code)
+        await msg.reply_text(f"✅ Цена обновлена: {label} — {price_text}", reply_markup=_admin_menu_keyboard())
+        return
+
+    # --- Добавление акции: текст, либо фото с текстом в подписи ---
+    if context.user_data.get("awaiting") == "promo_add_text":
+        context.user_data.pop("awaiting", None)
+        if msg.photo:
+            caption = (msg.caption or "").strip()
+            if not caption:
+                context.user_data["awaiting"] = "promo_add_text"
+                await msg.reply_text(
+                    "К фото нужен текст акции в подписи. Отправьте фото с подписью ещё раз "
+                    "(или напишите «Отмена»):"
+                )
+                return
+            context.user_data["promo_add"] = {"text": caption, "photo_file_id": msg.photo[-1].file_id}
+            await _ask_promo_discount(msg, context)
+            return
+        if text.lower() == "отмена":
+            context.user_data.pop("promo_add", None)
+            await msg.reply_text("Добавление акции отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        if not text:
+            context.user_data["awaiting"] = "promo_add_text"
+            await msg.reply_text("Пришлите текст акции или фото с подписью (или «Отмена»):")
+            return
+        context.user_data["promo_add"] = {"text": text, "photo_file_id": None}
+        await _ask_promo_discount(msg, context)
+        return
+
+    # --- Акция: ввод процента скидки ---
+    if context.user_data.get("awaiting") == "promo_add_percent":
+        context.user_data.pop("awaiting", None)
+        if text.lower() == "отмена":
+            context.user_data.pop("promo_add", None)
+            await msg.reply_text("Добавление акции отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        if text == "-":
+            promo_data = context.user_data.pop("promo_add", {})
+            add_promotion(promo_data["text"], promo_data.get("photo_file_id"))
+            await msg.reply_text("✅ Акция добавлена (без скидки, только информационный текст).",
+                                  reply_markup=_admin_menu_keyboard())
+            return
+        try:
+            percent = int(text.strip().replace("%", ""))
+            if not (1 <= percent <= 90):
+                raise ValueError
+        except ValueError:
+            context.user_data["awaiting"] = "promo_add_percent"
+            await msg.reply_text("Нужно целое число от 1 до 90 (например 10), или «-» без скидки. Ещё раз:")
+            return
+        context.user_data.setdefault("promo_add", {})["discount_percent"] = percent
+        context.user_data.setdefault("promo_add", {}).setdefault("service_codes", [])
+        await msg.reply_text(
+            "На какие услуги действует скидка? Отметьте нужные и нажмите «➡️ Дальше» "
+            "(если не выбрать ни одной — скидка будет действовать на все услуги):",
+            reply_markup=_promo_services_pick_keyboard([]),
+        )
+        return
+
+    # --- Акция: ввод даты окончания скидки ---
+    if context.user_data.get("awaiting") == "promo_add_until":
+        context.user_data.pop("awaiting", None)
+        promo_data = context.user_data.pop("promo_add", None)
+        if text.lower() == "отмена" or not promo_data:
+            await msg.reply_text("Добавление акции отменено.", reply_markup=_admin_menu_keyboard())
+            return
+        valid_until = None
+        if text.strip() != "-":
+            try:
+                date_cls.fromisoformat(text.strip())
+                valid_until = text.strip()
+            except ValueError:
+                context.user_data["promo_add"] = promo_data
+                context.user_data["awaiting"] = "promo_add_until"
+                await msg.reply_text(
+                    "Не понял дату. Введите в формате ГГГГ-ММ-ДД (например 2026-08-10), "
+                    "«-» для бессрочной скидки, или «Отмена»:"
+                )
+                return
+        add_promotion(
+            promo_data["text"], promo_data.get("photo_file_id"),
+            discount_percent=promo_data.get("discount_percent", 0),
+            service_codes=promo_data.get("service_codes") or [],
+            valid_until=valid_until,
+        )
+        codes = promo_data.get("service_codes") or []
+        services_note = ", ".join(SERVICE_LABELS.get(c, c) for c in codes) if codes else "все услуги"
+        until_note = f"до {date_cls.fromisoformat(valid_until).strftime('%d.%m.%Y')}" if valid_until else "бессрочно"
+        await msg.reply_text(
+            f"✅ Акция добавлена: -{promo_data.get('discount_percent', 0)}% на {services_note}, {until_note}.",
+            reply_markup=_admin_menu_keyboard(),
+        )
+        return
+
     # --- Нажатия кнопок нижнего меню ---
     if text == ADMIN_MENU_TODAY:
         await _show_today(update, context)
@@ -1847,12 +2621,33 @@ async def admin_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await admin_cancel_all_start(update, context)
         return
 
+    if text == ADMIN_MENU_REVIEWS:
+        await admin_reviews(update, context)
+        return
+
+    if text == ADMIN_MENU_SERVICES:
+        await admin_services_start(update, context)
+        return
+
+    if text == ADMIN_MENU_PROMOTIONS:
+        await admin_promotions_start(update, context)
+        return
+
     if text == ADMIN_MENU_HELP:
         await admin_start(update, context)
         return
 
     # --- Иначе считаем, что это ответ клиенту (обычный Reply-флоу) ---
     await admin_reply(update, context)
+
+
+async def _ask_promo_discount(msg, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Общий шаг диалога добавления акции: спросить процент скидки после текста/фото."""
+    context.user_data["awaiting"] = "promo_add_percent"
+    await msg.reply_text(
+        "Нужна ли скидка по этой акции? Введите процент скидки числом (например: 10), "
+        "или «-», если это просто информационное сообщение без скидки:"
+    )
 
 
 async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2093,6 +2888,7 @@ async def main() -> None:
     client_app.add_handler(CallbackQueryHandler(client_cancel_callback, pattern=r"^cancel_(ask|yes):"))
     client_app.add_handler(CallbackQueryHandler(client_reschedule_callback, pattern=r"^resched_(ask|date|time):"))
     client_app.add_handler(CallbackQueryHandler(client_review_callback, pattern=r"^review:"))
+    client_app.add_handler(CallbackQueryHandler(client_reviews_callback, pattern=r"^(reviews:|freereview:)"))
 
     client_app.add_handler(MessageHandler(filters.CONTACT, client_contact_received))
     client_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.CONTACT, client_incoming))
@@ -2104,13 +2900,18 @@ async def main() -> None:
     admin_app.add_handler(CommandHandler("today", admin_today))
     admin_app.add_handler(CommandHandler("calendar", admin_calendar))
     admin_app.add_handler(CommandHandler("stats", admin_stats))
+    admin_app.add_handler(CommandHandler("reviews", admin_reviews))
     admin_app.add_handler(CommandHandler("export", admin_export))
     admin_app.add_handler(CommandHandler("addbooking", admin_addbooking_start))
+    admin_app.add_handler(CommandHandler("services", admin_services_start))
+    admin_app.add_handler(CommandHandler("promotions", admin_promotions_start))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern=r"^admin_cancel_"))
     admin_app.add_handler(CallbackQueryHandler(admin_noshow_callback, pattern=r"^admin_noshow_"))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_all_callback, pattern=r"^cancelall_"))
     admin_app.add_handler(CallbackQueryHandler(admin_calendar_callback, pattern=r"^cal_"))
     admin_app.add_handler(CallbackQueryHandler(admin_addbooking_callback, pattern=r"^aadd_"))
+    admin_app.add_handler(CallbackQueryHandler(admin_services_callback, pattern=r"^svc_"))
+    admin_app.add_handler(CallbackQueryHandler(admin_promotions_callback, pattern=r"^(promo_|promosvc_)"))
     admin_app.add_handler(CallbackQueryHandler(admin_quick_reply_callback, pattern=r"^qr:"))
     admin_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, admin_dispatch))
 
