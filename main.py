@@ -101,6 +101,7 @@ CLIENT_BOT_USERNAME = os.environ.get("CLIENT_BOT_USERNAME", "").strip().lstrip("
 
 BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "links.json"
+CLIENTS_FILE = BASE_DIR / "clients.json"     # реестр всех, кто хоть раз зашёл в клиентский бот
 BOOKINGS_FILE = BASE_DIR / "bookings.json"
 REVIEWS_FILE = BASE_DIR / "reviews.json"
 BLOCKED_FILE = BASE_DIR / "blocked_slots.json"
@@ -126,7 +127,7 @@ PRICE_LIST_PDF = MEDIA_DIR / "price_list.pdf"  # если есть готовы�
 _DEFAULT_SERVICES = [
     {"code": "makeup", "label": "💄 Макияж", "price": "150 смн", "price_value": 150},
     {"code": "hair", "label": "💇‍♀️ Причёска", "price": "80 смн", "price_value": 120},
-    
+    {"code": "lashes", "label": "👁️ Наращивание ресниц", "price": "200 смн", "price_value": 200},
     {"code": "photo", "label": "📸 Фотосъёмка", "price": "300 смн", "price_value": 300},
     {"code": "video", "label": "🎥 Видеосъёмка", "price": "500 смн", "price_value": 500},
 ]
@@ -219,6 +220,10 @@ SLOT_MINUTES = 60         # длительность одного слота (о
 DAYS_AHEAD = 30           # на сколько дней вперёд показывать даты (календарь на месяц)
 
 WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+MONTH_RU = [
+    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
 
 REMINDER_HOURS_BEFORE = 2         # за сколько часов напомнить клиенту
 REVIEW_DELAY_AFTER_MIN = SLOT_MINUTES  # через сколько минут после начала слота спросить отзыв
@@ -241,6 +246,9 @@ SOCIAL_LINKS = [
     ("✈️ Telegram-канал", "https://t.me/muna_beauty"),
 ]
 
+# Кнопка «🖼 Портфолио» ведёт клиента в этот Telegram-канал (там примеры работ, актуальные фото и т.п.)
+PORTFOLIO_CHANNEL_URL = "https://t.me/muna_beauty"
+
 # Быстрые готовые ответы админа — жмёт кнопку под сообщением клиента, текст уходит сразу.
 # Список легко менять/дополнять: (код, текст_который_уйдёт_клиенту)
 QUICK_REPLIES = [
@@ -259,6 +267,7 @@ ADMIN_MENU_SLOTS = "📆 Записи на дату"
 ADMIN_MENU_CALENDAR = "🗓 Календарь"
 ADMIN_MENU_ADD = "➕ Добавить запись"
 ADMIN_MENU_STATS = "📈 Статистика"
+ADMIN_MENU_CLIENTS = "👥 Клиенты бота"
 ADMIN_MENU_EXPORT = "📤 Экспорт CSV"
 ADMIN_MENU_BROADCAST = "📢 Рассылка"
 ADMIN_MENU_CANCEL_ALL = "❌ Отменить предстоящие записи"
@@ -287,6 +296,7 @@ def _save_json(path: Path, data: dict) -> None:
 
 
 LINKS = _load_json(DATA_FILE)          # { "<admin_message_id>": {"client_chat_id": int, "name": str} }
+CLIENTS = _load_json(CLIENTS_FILE)     # { "<chat_id>": {"name","username","first_seen","last_seen"} } — все, кто заходил в клиентский бот
 BOOKINGS = _load_json(BOOKINGS_FILE)    # { "2026-07-26_14:00": {...} }
 REVIEWS = _load_json(REVIEWS_FILE)      # { "2026-07-26_14:00": {"score": int, "client_chat_id": int} }
 BLOCKED = _load_json(BLOCKED_FILE)      # { "2026-07-26_14:00": true }  — слоты, закрытые админом вручную
@@ -394,6 +404,29 @@ def recall(admin_chat_id, admin_message_id: int):
     return LINKS.get(_link_key(admin_chat_id, admin_message_id))
 
 
+def register_client(chat_id: int, name: str, username: str | None) -> bool:
+    """Запоминает клиента, зашедшего в клиентский бот (для счётчика «сколько клиентов зашли в бот»).
+    Возвращает True, если это НОВЫЙ клиент (первый визит)."""
+    key = str(chat_id)
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    is_new = key not in CLIENTS
+    if is_new:
+        CLIENTS[key] = {
+            "name": name,
+            "username": username or "",
+            "first_seen": now_iso,
+            "last_seen": now_iso,
+        }
+    else:
+        CLIENTS[key]["last_seen"] = now_iso
+        if name:
+            CLIENTS[key]["name"] = name
+        if username:
+            CLIENTS[key]["username"] = username
+    _save_json(CLIENTS_FILE, CLIENTS)
+    return is_new
+
+
 def save_booking(slot_key: str, service_code: str, client_chat_id: int, name: str, phone: str,
                   price_value: int | None = None) -> None:
     BOOKINGS[slot_key] = {
@@ -405,8 +438,22 @@ def save_booking(slot_key: str, service_code: str, client_chat_id: int, name: st
         # используется для статистики/дохода, чтобы будущие изменения цены или акции
         # не искажали задним числом уже прошедшие записи.
         "price_value": price_value if price_value is not None else SERVICE_PRICE_VALUES.get(service_code, 0),
+        # Отмечается кнопкой "✅ Пришёл" в админ-боте. Пока не отмечено — запись
+        # не попадает в отчёты статистики (день/неделя/месяц/год).
+        "attended": False,
     }
     _save_json(BOOKINGS_FILE, BOOKINGS)
+
+
+def mark_attended(slot_key: str) -> dict | None:
+    """Отмечает, что клиент пришёл на визит. После этого запись учитывается
+    в отчётах статистики (день/неделя/месяц/год)."""
+    entry = BOOKINGS.get(slot_key)
+    if entry is None:
+        return None
+    entry["attended"] = True
+    _save_json(BOOKINGS_FILE, BOOKINGS)
+    return entry
 
 
 def delete_booking(slot_key: str):
@@ -576,6 +623,8 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 async def client_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    register_client(update.effective_chat.id, user.full_name if user else "", user.username if user else None)
     context.user_data["_menu_sent"] = True
     await update.message.reply_text(CLIENT_WELCOME, reply_markup=_main_menu_keyboard())
 
@@ -649,6 +698,7 @@ async def client_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # сразу показываем нижнюю клавиатуру, чтобы она не появлялась только после /start.
     if not context.user_data.get("_menu_sent"):
         context.user_data["_menu_sent"] = True
+        register_client(msg.chat_id, user.full_name if user else "", user.username if user else None)
         await msg.reply_text(CLIENT_WELCOME, reply_markup=_main_menu_keyboard())
 
     pending = context.user_data.get("pending_booking")
@@ -866,7 +916,9 @@ async def _finalize_booking(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"Время: {time_str}"
         )
         keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Пришёл", callback_data=f"admin_attend:{slot_key}"),
             InlineKeyboardButton("🚫 Не пришёл", callback_data=f"admin_noshow_ask:{slot_key}"),
+        ], [
             InlineKeyboardButton("❌ Отменить запись", callback_data=f"admin_cancel_ask:{slot_key}"),
         ]])
         for admin_chat_id in ADMIN_CHAT_IDS:
@@ -979,23 +1031,16 @@ async def client_review_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def _send_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    files = []
-    if PORTFOLIO_DIR.exists():
-        files = sorted(
-            p for p in PORTFOLIO_DIR.iterdir()
-            if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".mp4", ".mov")
-        )
-    if not files:
+    """Кнопка «🖼 Портфолио» — отправляет ссылку-кнопку на Telegram-канал с примерами работ."""
+    if not PORTFOLIO_CHANNEL_URL:
         await context.bot.send_message(chat_id=chat_id, text="Портфолио скоро будет пополнено 🙌 Загляните позже!")
         return
-    for f in files[:10]:
-        try:
-            if f.suffix.lower() in (".mp4", ".mov"):
-                await context.bot.send_video(chat_id=chat_id, video=f.open("rb"))
-            else:
-                await context.bot.send_photo(chat_id=chat_id, photo=f.open("rb"))
-        except Exception:
-            log.exception("Не удалось отправить файл портфолио %s", f)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✈️ Открыть канал с портфолио", url=PORTFOLIO_CHANNEL_URL)]])
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🖼 Все примеры наших работ — в Telegram-канале. Загляните и подпишитесь, чтобы не пропустить новое ✨",
+        reply_markup=keyboard,
+    )
 
 
 async def _send_price(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1414,8 +1459,9 @@ def _admin_menu_keyboard() -> ReplyKeyboardMarkup:
         [
             [ADMIN_MENU_TODAY, ADMIN_MENU_CALENDAR],
             [ADMIN_MENU_SLOTS, ADMIN_MENU_STATS],
-            [ADMIN_MENU_ADD, ADMIN_MENU_EXPORT],
-            [ADMIN_MENU_BROADCAST, ADMIN_MENU_CANCEL_ALL],
+            [ADMIN_MENU_ADD, ADMIN_MENU_CLIENTS],
+            [ADMIN_MENU_EXPORT, ADMIN_MENU_BROADCAST],
+            [ADMIN_MENU_CANCEL_ALL],
             [ADMIN_MENU_REVIEWS],
             [ADMIN_MENU_SERVICES, ADMIN_MENU_PROMOTIONS],
             [ADMIN_MENU_HELP],
@@ -1446,7 +1492,8 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "/calendar [ГГГГ-ММ-ДД] — интерактивный календарь дня (открыть/закрыть слоты, "
         "а на свободном 🟢 слоте можно сразу «Записать клиента»)\n"
         "/addbooking — добавить запись вручную (клиент по телефону, без Telegram)\n"
-        "/stats — статистика за текущий месяц (учитывает и ручные записи)\n"
+        "/stats — статистика (день/неделя/месяц/год) по визитам, отмеченным «Пришёл»\n"
+        "/clients — сколько всего клиентов зашли в бот\n"
         "/reviews — список отзывов клиентов\n"
         "/services — добавить услугу или изменить цену существующей\n"
         "/promotions — добавить или удалить акцию (кнопка «🎁 Акции» у клиента)\n"
@@ -1703,17 +1750,22 @@ async def admin_calendar_callback(update: Update, context: ContextTypes.DEFAULT_
         status = get_client_status(entry["client_chat_id"])
         manual_note = " · запись без Telegram" if entry.get("manual") else ""
         await query.answer()
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚫 Клиент не пришёл", callback_data=f"admin_noshow_ask:{slot_key}")],
-            [InlineKeyboardButton("❌ Отменить запись", callback_data=f"admin_cancel_ask:{slot_key}")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data=f"cal_date:{date_iso}")],
-        ])
+        attended = entry.get("attended", False)
+        keyboard_rows = []
+        if not attended:
+            keyboard_rows.append([InlineKeyboardButton("✅ Клиент пришёл", callback_data=f"admin_attend:{slot_key}")])
+        keyboard_rows.append([InlineKeyboardButton("🚫 Клиент не пришёл", callback_data=f"admin_noshow_ask:{slot_key}")])
+        keyboard_rows.append([InlineKeyboardButton("❌ Отменить запись", callback_data=f"admin_cancel_ask:{slot_key}")])
+        keyboard_rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"cal_date:{date_iso}")])
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
+        attended_line = "✅ Пришёл (учтено в статистике)" if attended else "⏳ Ещё не отмечен как пришедший"
         await query.edit_message_text(
             f"🔴 {date_iso} {time_part}{manual_note}\n\n"
             f"Клиент: {entry.get('name', '')}\n"
             f"Услуга: {label}\n"
             f"Тел.: {entry.get('phone') or 'не указан'}\n"
-            f"Статус: {status}",
+            f"Статус: {status}\n"
+            f"Визит: {attended_line}",
             reply_markup=keyboard,
         )
         return
@@ -1896,77 +1948,297 @@ async def _finalize_admin_booking(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
-# --- Статистика --------------------------------------------------------------------
+# --- Статистика (отчёты День / Неделя / Месяц / Год) -------------------------------
+#
+# Отчёты считаются только по записям, отмеченным кнопкой "✅ Пришёл" (поле
+# entry["attended"] == True) — то есть по реально состоявшимся визитам, а не по
+# всем записям подряд. Пока визит не отмечен, он в отчёты не попадает.
 
-def _compute_stats() -> dict:
-    """Считает статистику за текущий календарный месяц по данным BOOKINGS."""
-    now = datetime.now()
-    month_prefix = now.strftime("%Y-%m")
-    month_entries = [(k, v) for k, v in BOOKINGS.items() if k.startswith(month_prefix)]
-
-    total_count = len(month_entries)
-    revenue = sum(v.get("price_value", SERVICE_PRICE_VALUES.get(v["service"], 0)) for _, v in month_entries)
-
-    service_counter = Counter(v["service"] for _, v in month_entries)
-    top = service_counter.most_common(1)
-    top_service_label = SERVICE_LABELS.get(top[0][0], top[0][0]) if top else "—"
-
-    weekday_counter = Counter(_slot_datetime(k).weekday() for k, _ in month_entries)
-    best = weekday_counter.most_common(1)
-    best_day_label = WEEKDAY_RU[best[0][0]] if best else "—"
-
-    # Новый клиент — все его записи в этом месяце. Повторный — есть запись до этого месяца.
-    month_clients = {v["client_chat_id"] for _, v in month_entries}
-    new_clients = 0
-    repeat_clients = 0
-    for cid in month_clients:
-        had_before = any(
-            v.get("client_chat_id") == cid and not k.startswith(month_prefix)
-            for k, v in BOOKINGS.items()
-        )
-        if had_before:
-            repeat_clients += 1
+def _period_bounds(period: str, today: date_cls) -> tuple[date_cls, date_cls]:
+    if period == "day":
+        return today, today
+    if period == "week":
+        start = today - timedelta(days=today.weekday())  # понедельник этой недели
+        end = start + timedelta(days=6)
+        return start, end
+    if period == "month":
+        start = today.replace(day=1)
+        if start.month == 12:
+            next_month_start = start.replace(year=start.year + 1, month=1)
         else:
-            new_clients += 1
+            next_month_start = start.replace(month=start.month + 1)
+        end = next_month_start - timedelta(days=1)
+        return start, end
+    if period == "year":
+        return today.replace(month=1, day=1), today.replace(month=12, day=31)
+    raise ValueError(f"неизвестный период: {period}")
 
-    return {
-        "month_label": now.strftime("%m.%Y"),
-        "total_count": total_count,
-        "revenue": revenue,
-        "top_service_label": top_service_label,
-        "best_day_label": best_day_label,
-        "new_clients": new_clients,
-        "repeat_clients": repeat_clients,
-    }
+
+def _attended_entries_in_range(start: date_cls, end: date_cls) -> list[tuple[str, dict, date_cls]]:
+    result = []
+    for slot_key, entry in BOOKINGS.items():
+        if not entry.get("attended"):
+            continue
+        d = _slot_datetime(slot_key).date()
+        if start <= d <= end:
+            result.append((slot_key, entry, d))
+    return result
+
+
+def _summarize(entries: list[tuple[str, dict, date_cls]]) -> tuple[int, int, str, Counter]:
+    """Возвращает (кол-во клиентов, сумма, текст услуг «Услуга × N, ...», Counter услуг)."""
+    count = len(entries)
+    revenue = sum(v.get("price_value", 0) for _, v, _ in entries)
+    service_counter = Counter(v["service"] for _, v, _ in entries)
+    services_text = ", ".join(
+        f"{SERVICE_LABELS.get(code, code)} × {n}" for code, n in service_counter.most_common()
+    ) or "—"
+    return count, revenue, services_text, service_counter
+
+
+def _stats_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📅 День", callback_data="stats_period:day"),
+            InlineKeyboardButton("🗓 Неделя", callback_data="stats_period:week"),
+        ],
+        [
+            InlineKeyboardButton("📆 Месяц", callback_data="stats_period:month"),
+            InlineKeyboardButton("📈 Год", callback_data="stats_period:year"),
+        ],
+    ])
+
+
+def _build_stats_report(period: str) -> str:
+    today = datetime.now().date()
+    start, end = _period_bounds(period, today)
+    entries = _attended_entries_in_range(start, end)
+
+    if period == "day":
+        count, revenue, services_text, _ = _summarize(entries)
+        return (
+            f"📊 Отчёт за день — {today.strftime('%d.%m.%Y')} ({WEEKDAY_RU[today.weekday()]})\n\n"
+            f"Клиентов: {count}\n"
+            f"Услуги: {services_text}\n"
+            f"Итого сумма: {revenue} смн"
+        )
+
+    if period == "week":
+        lines = [f"📊 Отчёт за неделю — {start.strftime('%d.%m')}–{end.strftime('%d.%m.%Y')}", ""]
+        by_day: dict[date_cls, list] = defaultdict(list)
+        for slot_key, v, d in entries:
+            by_day[d].append((slot_key, v, d))
+        best_day, best_count = None, -1
+        for i in range(7):
+            d = start + timedelta(days=i)
+            day_entries = by_day.get(d, [])
+            count, revenue, services_text, _ = _summarize(day_entries)
+            if count > best_count:
+                best_count, best_day = count, d
+            marker = " 👑" if d == today else ""
+            lines.append(
+                f"{WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}{marker}: "
+                f"{count} клиент(ов) — {services_text} — {revenue} смн"
+            )
+        total_count, total_revenue, _, service_counter = _summarize(entries)
+        top = service_counter.most_common(1)
+        top_label = SERVICE_LABELS.get(top[0][0], top[0][0]) if top else "—"
+        lines.append("")
+        lines.append(f"Итого за неделю: {total_count} клиент(ов), {total_revenue} смн")
+        lines.append(f"Популярная услуга: {top_label}")
+        if best_count > 0:
+            lines.append(f"Больше всего клиентов: {WEEKDAY_RU[best_day.weekday()]} {best_day.strftime('%d.%m')} ({best_count})")
+        return "\n".join(lines)
+
+    if period == "month":
+        lines = [f"📊 Отчёт за месяц — {MONTH_RU[start.month]} {start.year}", ""]
+        by_day_count = Counter(d for _, _, d in entries)
+        by_week: dict[int, list] = defaultdict(list)
+        for slot_key, v, d in entries:
+            by_week[d.isocalendar()[1]].append((slot_key, v, d))
+        for week_num in sorted(by_week):
+            week_entries = by_week[week_num]
+            count, revenue, services_text, _ = _summarize(week_entries)
+            dates = sorted(d for _, _, d in week_entries)
+            lines.append(
+                f"Неделя {dates[0].strftime('%d.%m')}–{dates[-1].strftime('%d.%m')}: "
+                f"{count} клиент(ов) — {services_text} — {revenue} смн"
+            )
+        total_count, total_revenue, _, service_counter = _summarize(entries)
+        top = service_counter.most_common(1)
+        top_label = SERVICE_LABELS.get(top[0][0], top[0][0]) if top else "—"
+        lines.append("")
+        lines.append(f"Итого за месяц: {total_count} клиент(ов), {total_revenue} смн")
+        lines.append(f"Популярная услуга: {top_label}")
+        if by_day_count:
+            best_day, best_count = by_day_count.most_common(1)[0]
+            lines.append(f"Больше всего клиентов за день: {best_day.strftime('%d.%m')} ({best_count})")
+        return "\n".join(lines)
+
+    if period == "year":
+        lines = [f"📊 Отчёт за год — {today.year}", ""]
+        by_month: dict[int, list] = defaultdict(list)
+        for slot_key, v, d in entries:
+            by_month[d.month].append((slot_key, v, d))
+        best_month, best_count = None, -1
+        for m in range(1, 13):
+            month_entries = by_month.get(m, [])
+            if not month_entries:
+                continue
+            count, revenue, services_text, _ = _summarize(month_entries)
+            if count > best_count:
+                best_count, best_month = count, m
+            lines.append(f"{MONTH_RU[m]}: {count} клиент(ов) — {services_text} — {revenue} смн")
+        total_count, total_revenue, _, service_counter = _summarize(entries)
+        top = service_counter.most_common(1)
+        top_label = SERVICE_LABELS.get(top[0][0], top[0][0]) if top else "—"
+        lines.append("")
+        lines.append(f"Итого за год: {total_count} клиент(ов), {total_revenue} смн")
+        lines.append(f"Популярная услуга: {top_label}")
+        if best_month:
+            lines.append(f"Больше всего клиентов за месяц: {MONTH_RU[best_month]} ({best_count})")
+        return "\n".join(lines)
+
+    return "Неизвестный период."
+
+
+async def admin_clients_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/clients и кнопка «👥 Клиенты бота» — сколько всего уникальных клиентов зашли в клиентский бот."""
+    if not _is_admin_chat(update.effective_chat.id):
+        await _deny_admin_access(update)
+        return
+
+    total = len(CLIENTS)
+    today_iso = datetime.now().date().isoformat()
+    week_start = (datetime.now().date() - timedelta(days=datetime.now().date().weekday())).isoformat()
+    month_prefix = datetime.now().strftime("%Y-%m")
+
+    new_today = sum(1 for c in CLIENTS.values() if c.get("first_seen", "").startswith(today_iso))
+    new_week = sum(1 for c in CLIENTS.values() if c.get("first_seen", "") >= week_start)
+    new_month = sum(1 for c in CLIENTS.values() if c.get("first_seen", "").startswith(month_prefix))
+
+    booked_ids = {v.get("client_chat_id") for v in BOOKINGS.values() if v.get("client_chat_id", 0) > 0}
+    booked_count = len(booked_ids)
+
+    text = (
+        f"👥 Клиенты, зашедшие в бот\n\n"
+        f"Всего уникальных клиентов: {total}\n"
+        f"Из них хотя бы раз записались: {booked_count}\n"
+        f"Только смотрели, не записались: {max(total - booked_count, 0)}\n\n"
+        f"Новых сегодня: {new_today}\n"
+        f"Новых за эту неделю: {new_week}\n"
+        f"Новых за этот месяц: {new_month}"
+    )
+    await update.message.reply_text(text, reply_markup=_admin_menu_keyboard())
+
 
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/stats — статистика записей за текущий календарный месяц."""
+    """/stats и кнопка «📈 Статистика» — меню выбора отчёта (день/неделя/месяц/год)."""
     if not _is_admin_chat(update.effective_chat.id):
         await _deny_admin_access(update)
         return
-    stats = _compute_stats()
-    text = (
-        f"📈 Статистика за {stats['month_label']}\n\n"
-        f"Записей за месяц: {stats['total_count']}\n"
-        f"Ожидаемый доход (по прайсу, с учётом акций на момент записи): {stats['revenue']} смн\n"
-        f"Самая популярная услуга: {stats['top_service_label']}\n"
-        f"Лучший день недели: {stats['best_day_label']}\n"
-        f"Новых клиентов: {stats['new_clients']}\n"
-        f"Повторных клиентов: {stats['repeat_clients']}\n\n"
-        f"(доход считается по всем записям месяца, включая ещё не состоявшиеся;\n"
-        f"отменённые записи в подсчёт не входят)"
+    await update.message.reply_text(
+        "📈 Выберите период отчёта:\n\n"
+        "(учитываются только визиты, отмеченные кнопкой «✅ Пришёл»)",
+        reply_markup=_stats_menu_keyboard(),
     )
-    await update.message.reply_text(text)
+
+
+async def admin_stats_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие кнопок День/Неделя/Месяц/Год (stats_period:*)."""
+    query = update.callback_query
+
+    if not _is_admin_chat(update.effective_chat.id):
+        await query.answer("⛔ Доступ только для администратора", show_alert=True)
+        return
+
+    await query.answer()
+    period = query.data.split(":", 1)[1]
+    text = _build_stats_report(period)
+    try:
+        await query.edit_message_text(text, reply_markup=_stats_menu_keyboard())
+    except Exception:
+        # текст не изменился (Telegram не разрешает редактировать в тот же текст) — игнорируем
+        pass
+
+
+def _admin_reviews_delete_keyboard(limit: int = 15) -> InlineKeyboardMarkup:
+    """Кнопки удаления под каждым из последних отзывов."""
+    items = sorted(REVIEWS.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)[:limit]
+    rows = []
+    for review_key, r in items:
+        stars = "⭐" * r.get("score", 0)
+        name = r.get("name", "Клиент")
+        rows.append([InlineKeyboardButton(f"🗑 Удалить: {stars} — {name}", callback_data=f"review_delete_ask:{review_key}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def admin_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/reviews и кнопка «📝 Отзывы» — список последних отзывов клиентов."""
+    """/reviews и кнопка «📝 Отзывы» — список последних отзывов клиентов с возможностью удалить любой."""
     if not _is_admin_chat(update.effective_chat.id):
         await _deny_admin_access(update)
         return
-    text = _reviews_summary_text() + "\n\n" + _format_reviews_list(limit=30)
+    text = _reviews_summary_text() + "\n\n" + _format_reviews_list(limit=15)
     await update.message.reply_text(text, reply_markup=_admin_menu_keyboard())
+    if REVIEWS:
+        await update.message.reply_text(
+            "Управление отзывами — нажмите, чтобы удалить отзыв:",
+            reply_markup=_admin_reviews_delete_keyboard(),
+        )
+
+
+async def admin_review_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает удаление отзыва через админ-панель (review_delete_ask/yes/no)."""
+    query = update.callback_query
+
+    if not _is_admin_chat(update.effective_chat.id):
+        await query.answer("⛔ Доступ только для администратора", show_alert=True)
+        return
+
+    data = query.data
+
+    if data.startswith("review_delete_ask:"):
+        review_key = data.split(":", 1)[1]
+        review = REVIEWS.get(review_key)
+        if not review:
+            await query.answer("Отзыв уже удалён", show_alert=True)
+            await query.edit_message_reply_markup(reply_markup=_admin_reviews_delete_keyboard())
+            return
+        stars = "⭐" * review.get("score", 0)
+        name = review.get("name", "Клиент")
+        await query.answer()
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Да, удалить", callback_data=f"review_delete_yes:{review_key}"),
+            InlineKeyboardButton("Отмена", callback_data="review_delete_no"),
+        ]])
+        await query.edit_message_text(f"Удалить отзыв {stars} — {name}?", reply_markup=keyboard)
+        return
+
+    if data == "review_delete_no":
+        await query.answer("Отменено")
+        if REVIEWS:
+            await query.edit_message_text(
+                "Управление отзывами — нажмите, чтобы удалить отзыв:",
+                reply_markup=_admin_reviews_delete_keyboard(),
+            )
+        else:
+            await query.edit_message_text("Отзывов пока нет.")
+        return
+
+    if data.startswith("review_delete_yes:"):
+        review_key = data.split(":", 1)[1]
+        REVIEWS.pop(review_key, None)
+        _save_json(REVIEWS_FILE, REVIEWS)
+        await query.answer("Отзыв удалён")
+        if REVIEWS:
+            await query.edit_message_text(
+                "Отзыв удалён ✅\n\nУправление отзывами — нажмите, чтобы удалить отзыв:",
+                reply_markup=_admin_reviews_delete_keyboard(),
+            )
+        else:
+            await query.edit_message_text("Отзыв удалён ✅\n\nБольше отзывов нет.")
+        return
 
 
 # --- Управление услугами (добавление / изменение цены / удаление) -----------------
@@ -2605,6 +2877,10 @@ async def admin_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await admin_stats(update, context)
         return
 
+    if text == ADMIN_MENU_CLIENTS:
+        await admin_clients_count(update, context)
+        return
+
     if text == ADMIN_MENU_EXPORT:
         await admin_export(update, context)
         return
@@ -2694,6 +2970,55 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception:
                 log.exception("Не удалось уведомить клиента об отмене админом")
         return
+
+
+async def admin_attend_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «✅ Пришёл» (admin_attend:slot_key). Отмечает визит как состоявшийся —
+    с этого момента запись учитывается в отчётах статистики (день/неделя/месяц/год)."""
+    query = update.callback_query
+
+    if not _is_admin_chat(update.effective_chat.id):
+        await query.answer("⛔ Доступ только для администратора", show_alert=True)
+        return
+
+    slot_key = query.data.split(":", 1)[1]
+    entry = mark_attended(slot_key)
+
+    if not entry:
+        await query.answer("Запись не найдена (возможно, уже отменена)", show_alert=True)
+        return
+
+    await query.answer("Отмечено: клиент пришёл ✅")
+
+    old_text = query.message.text if query.message else ""
+    if "Визит: ⏳" in old_text:
+        # Это панель cal_info — обновляем строку статуса визита и убираем кнопку «Пришёл».
+        new_text = old_text.replace(
+            "Визит: ⏳ Ещё не отмечен как пришедший",
+            "Визит: ✅ Пришёл (учтено в статистике)",
+        )
+        date_iso = slot_key.split("_", 1)[0]
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚫 Клиент не пришёл", callback_data=f"admin_noshow_ask:{slot_key}")],
+            [InlineKeyboardButton("❌ Отменить запись", callback_data=f"admin_cancel_ask:{slot_key}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"cal_date:{date_iso}")],
+        ])
+        try:
+            await query.edit_message_text(new_text, reply_markup=keyboard)
+        except Exception:
+            pass
+    elif old_text and "ОТМЕЧЕНО: КЛИЕНТ ПРИШЁЛ" not in old_text:
+        # Это уведомление о новой записи — просто дописываем отметку.
+        new_text = old_text + "\n\n✅ ОТМЕЧЕНО: КЛИЕНТ ПРИШЁЛ (учтено в статистике)"
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🚫 Не пришёл", callback_data=f"admin_noshow_ask:{slot_key}"),
+            InlineKeyboardButton("❌ Отменить запись", callback_data=f"admin_cancel_ask:{slot_key}"),
+        ]])
+        try:
+            await query.edit_message_text(new_text, reply_markup=keyboard)
+        except Exception:
+            pass
+    return
 
 
 async def admin_noshow_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2900,13 +3225,17 @@ async def main() -> None:
     admin_app.add_handler(CommandHandler("today", admin_today))
     admin_app.add_handler(CommandHandler("calendar", admin_calendar))
     admin_app.add_handler(CommandHandler("stats", admin_stats))
+    admin_app.add_handler(CommandHandler("clients", admin_clients_count))
     admin_app.add_handler(CommandHandler("reviews", admin_reviews))
     admin_app.add_handler(CommandHandler("export", admin_export))
     admin_app.add_handler(CommandHandler("addbooking", admin_addbooking_start))
     admin_app.add_handler(CommandHandler("services", admin_services_start))
     admin_app.add_handler(CommandHandler("promotions", admin_promotions_start))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern=r"^admin_cancel_"))
+    admin_app.add_handler(CallbackQueryHandler(admin_attend_callback, pattern=r"^admin_attend:"))
     admin_app.add_handler(CallbackQueryHandler(admin_noshow_callback, pattern=r"^admin_noshow_"))
+    admin_app.add_handler(CallbackQueryHandler(admin_stats_period_callback, pattern=r"^stats_period:"))
+    admin_app.add_handler(CallbackQueryHandler(admin_review_delete_callback, pattern=r"^review_delete_"))
     admin_app.add_handler(CallbackQueryHandler(admin_cancel_all_callback, pattern=r"^cancelall_"))
     admin_app.add_handler(CallbackQueryHandler(admin_calendar_callback, pattern=r"^cal_"))
     admin_app.add_handler(CallbackQueryHandler(admin_addbooking_callback, pattern=r"^aadd_"))
